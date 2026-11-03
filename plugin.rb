@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 # name: discourse-robot-mcp
-# about: MCP alati za IT tim: dokumentacija u IT-Wiki kroz Claude, bez lozinki
-# version: 0.1.0
+# about: MCP alati za IT tim: dokumentacija u IT-Wiki i javljanje u dodijeljene teme kroz Claude, bez lozinki
+# version: 0.2.0
 # authors: adopilot
 # url: https://github.com/adopilot/discourse-robot-mcp
 

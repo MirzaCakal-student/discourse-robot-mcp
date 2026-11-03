@@ -38,6 +38,34 @@ module ::RobotMcp
       6. Korisnička imena ne piši sa @ (to šalje obavijesti i poziva AI botove), osim ako korisnik to izričito traži.
     TEXT
 
+    REPORT_INSTRUCTIONS = <<~TEXT
+      Javi na forum (forum.robot.ba) napredak rada iz ove sesije, kao odgovor u temu koja je dodijeljena korisniku.
+
+      1. Vrsta odgovora. Ako je korisnik nije rekao, pitaj ga koju želi:
+         - Status: dokle se stiglo
+         - Urađeno: šta je završeno i kako provjeriti
+         - Sljedeći koraci: plan, šta slijedi i šta je potrebno
+         - Pitanje: šta treba od podnosioca ili kolege
+         "Objavi status" znači Status, "pitaj na forumu" znači Pitanje.
+      2. Tema. Pozovi robot_my_tasks, po potrebi sa ključnim riječima iz posla. Teme sa recently_reported=true su one u koje
+         je korisnik zadnje javljao. Ako se jedna jasno poklapa sa poslom, predloži nju, inače ponudi 3-5 najbližih i pitaj.
+         Ne pamti broj teme u svojoj memoriji ni u CLAUDE.md: dodjele se mijenjaju, uvijek ih provjeri kroz robot_my_tasks.
+      3. Pozovi robot_task_context da vidiš zadatak (prvi post) i dokle se stiglo (zadnji odgovori).
+      4. Napiši kratak odgovor na bosanskom, prilagođen vrsti:
+         - Status: **Status:** jedna rečenica, **Urađeno:** lista, **Sljedeće:** lista
+         - Urađeno: šta je završeno i kako se provjerava
+         - Sljedeći koraci: koraci redom i šta je za njih potrebno
+         - Pitanje: jasno pitanje i kontekst u 1-2 rečenice
+      5. NIKAD ne upisuj lozinke, ključeve ni tokene; umjesto vrijednosti napiši "lozinka: u trezoru".
+         Korisnike spominji sa @ samo ako korisnik želi da ih obavijesti; AI botove nikad.
+      6. Pozovi robot_check_secrets, pokaži korisniku nacrt i temu, a objavi (robot_task_reply) tek kad potvrdi.
+         Ako robot_task_reply javi da tema više nije dodijeljena korisniku, reci mu kome je dodijeljena i ponudi njegove trenutne zadatke.
+    TEXT
+
+    REPORT_KINDS = %w[status uradjeno sljedeci_koraci pitanje].freeze
+    REPORTED_FIELD = "robot_mcp_report"
+    RECENT_REPORT_DAYS = 30
+
     module_function
 
     def register!(plugin)
@@ -171,6 +199,107 @@ module ::RobotMcp
         risk: :write,
       )
 
+      plugin.register_mcp_tool(
+        "robot_my_tasks",
+        title: "Moje obaveze",
+        description:
+          "Otvorene, neriješene teme dodijeljene prijavljenom korisniku (isto kao /latest?assigned=<korisnik>&solved=no&status=open). " \
+            "Jedan red po temi. Teme u koje je korisnik zadnje javljao (recently_reported) su na vrhu. " \
+            "Ključne riječi iz posla suzavaju listu.",
+        implementation: MyTasks,
+        input_schema:
+          object_schema(
+            {
+              keywords: {
+                type: "string",
+                maxLength: 200,
+              },
+              max_results: {
+                type: "integer",
+                minimum: 1,
+                maximum: 30,
+              },
+            },
+          ),
+        output_schema: MyTasks::OUTPUT_SCHEMA,
+        required_scopes: MyTasks::REQUIRED_SCOPES,
+        annotations: READ_ONLY,
+      )
+
+      plugin.register_mcp_tool(
+        "robot_task_context",
+        title: "Kontekst zadatka",
+        description:
+          "Za temu dodijeljenu prijavljenom korisniku vraća prvi post (zadatak) i zadnjih nekoliko odgovora (dokle se stiglo).",
+        implementation: TaskContext,
+        input_schema:
+          object_schema(
+            {
+              topic_id: {
+                type: "integer",
+                minimum: 1,
+              },
+              last_posts: {
+                type: "integer",
+                minimum: 0,
+                maximum: 20,
+              },
+            },
+            required: %w[topic_id],
+          ),
+        output_schema: TaskContext::OUTPUT_SCHEMA,
+        required_scopes: TaskContext::REQUIRED_SCOPES,
+        annotations: READ_ONLY,
+      )
+
+      plugin.register_mcp_tool(
+        "robot_task_reply",
+        title: "Javi u dodijeljenu temu",
+        description:
+          "Objavljuje odgovor u temu koja je TRENUTNO dodijeljena prijavljenom korisniku (dodjela se provjerava pri objavi). " \
+            "Pozovi tek kad korisnik potvrdi nacrt i vrstu odgovora. Za zatvorenu ili riješenu temu traži confirm_closed=true " \
+            "nakon što korisnik potvrdi. Tekst sa lozinkama, ključevima ili tokenima biće odbijen.",
+        implementation: TaskReply,
+        input_schema:
+          object_schema(
+            {
+              topic_id: {
+                type: "integer",
+                minimum: 1,
+              },
+              kind: {
+                type: "string",
+                enum: REPORT_KINDS,
+              },
+              raw: {
+                type: "string",
+                minLength: 10,
+                maxLength: 30_000,
+              },
+              confirm_closed: {
+                type: "boolean",
+              },
+            },
+            required: %w[topic_id kind raw],
+          ),
+        output_schema: TaskReply::OUTPUT_SCHEMA,
+        required_scopes: TaskReply::REQUIRED_SCOPES,
+        annotations: WRITE,
+        risk: :write,
+      )
+
+      plugin.register_mcp_prompt(
+        "robot.javi",
+        title: "Javi ovo na forum",
+        description:
+          "Upute za javljanje napretka (status, urađeno, sljedeći koraci, pitanje) u temu dodijeljenu korisniku.",
+        implementation: ReportPrompt,
+        input_schema:
+          object_schema({ opis: { type: "string", maxLength: 1000 } }),
+        required_scopes: ReportPrompt::REQUIRED_SCOPES,
+        annotations: READ_ONLY,
+      )
+
       plugin.register_mcp_prompt(
         "robot.dokumentuj",
         title: "Dokumentuj u IT-Wiki",
@@ -225,6 +354,62 @@ module ::RobotMcp
 
     def result(value)
       DiscourseMcp::ToolHelpers.text_and_structured(value)
+    end
+
+    def my_open_tasks(user)
+      TopicQuery
+        .new(user, assigned: user.username, solved: "no", status: "open", per_page: 1000)
+        .list_latest
+        .topics
+    end
+
+    def assigned_to?(topic, user)
+      Assignment.where(
+        active: true,
+        topic_id: topic.id,
+        assigned_to_type: "User",
+        assigned_to_id: user.id,
+      ).exists?
+    end
+
+    def assignees(topic)
+      Assignment
+        .where(active: true, topic_id: topic.id)
+        .map { |a| a.assigned_to.try(:username) || a.assigned_to.try(:name) }
+        .compact
+        .uniq
+    end
+
+    # The assignment is the filter: categories don't matter, only who the topic is assigned to now.
+    def find_assigned_topic!(topic_id, request_context)
+      user = request_context.user
+      topic = ::Topic.find_by(id: topic_id)
+      if topic.blank? || !request_context.guardian.can_see?(topic)
+        raise DiscourseMcp::ToolError, "Tema ##{topic_id} nije pronađena."
+      end
+      if !assigned_to?(topic, user)
+        others = assignees(topic)
+        message =
+          if others.present?
+            "Tema ##{topic.id} više nije dodijeljena tebi, sada je dodijeljena: #{others.join(", ")}."
+          else
+            "Tema ##{topic.id} nije dodijeljena tebi (trenutno nije dodijeljena nikome)."
+          end
+        raise DiscourseMcp::ToolError,
+              "#{message} Ponudi korisniku njegove trenutne zadatke (robot_my_tasks)."
+      end
+      topic
+    end
+
+    def solved?(topic)
+      DB.query_single(
+        "SELECT 1 FROM discourse_solved_solved_topics WHERE topic_id = ? LIMIT 1",
+        topic.id,
+      ).present?
+    end
+
+    def truncate(text, limit)
+      text.length > limit ? "#{text[0, limit]}\n[… skraćeno]" : text
     end
 
     module Search
@@ -386,6 +571,155 @@ module ::RobotMcp
           url: post.full_url,
           username: post.user.username,
         )
+      end
+    end
+
+    module MyTasks
+      REQUIRED_SCOPES = [DiscourseMcp::Scopes::CONTENT_READ].freeze
+      OUTPUT_SCHEMA =
+        DiscourseMcp::OutputSchema.object(
+          tasks: DiscourseMcp::OutputSchema::OBJECT_ARRAY,
+          total_open: DiscourseMcp::OutputSchema::INTEGER,
+        )
+
+      def self.call(arguments:, request_context:)
+        user = Tools.ensure_member!(request_context)
+        topics = Tools.my_open_tasks(user)
+        ids = topics.map(&:id)
+
+        reported =
+          PostCustomField
+            .joins(:post)
+            .where(name: REPORTED_FIELD, posts: { topic_id: ids, user_id: user.id })
+            .where("posts.created_at > ?", RECENT_REPORT_DAYS.days.ago)
+            .group("posts.topic_id")
+            .maximum("posts.created_at")
+        my_last_post = Post.where(topic_id: ids, user_id: user.id).group(:topic_id).maximum(:created_at)
+
+        words = arguments["keywords"].to_s.downcase.scan(/[\p{L}\p{N}_.-]{3,}/).uniq
+        score = {}
+        if words.present?
+          first_posts = Post.where(topic_id: ids, post_number: 1).pluck(:topic_id, :raw).to_h
+          topics.each do |topic|
+            haystack = "#{topic.title} #{first_posts[topic.id]}".downcase
+            score[topic.id] = words.count { |word| haystack.include?(word) }
+          end
+          topics = topics.select { |topic| score[topic.id].to_i > 0 || reported[topic.id] }
+        end
+
+        limit = arguments.fetch("max_results", 10).to_i
+        topics =
+          topics.sort_by do |topic|
+            [
+              reported[topic.id] ? 0 : 1,
+              -score[topic.id].to_i,
+              -(reported[topic.id] || topic.bumped_at || topic.created_at).to_f,
+            ]
+          end
+        Tools.result(
+          tasks:
+            topics
+              .first(limit)
+              .map do |topic|
+                {
+                  topic_id: topic.id,
+                  title: topic.title,
+                  category: topic.category&.name,
+                  last_activity: topic.bumped_at&.to_date&.iso8601,
+                  posts_count: topic.posts_count,
+                  my_last_post: my_last_post[topic.id]&.to_date&.iso8601,
+                  recently_reported: reported.key?(topic.id),
+                  url: "#{Discourse.base_url}#{topic.relative_url}",
+                }
+              end,
+          total_open: ids.size,
+        )
+      end
+    end
+
+    module TaskContext
+      REQUIRED_SCOPES = [DiscourseMcp::Scopes::CONTENT_READ].freeze
+      OUTPUT_SCHEMA =
+        DiscourseMcp::OutputSchema.object(
+          topic: DiscourseMcp::OutputSchema::OBJECT,
+          first_post: DiscourseMcp::OutputSchema::OBJECT,
+          last_posts: DiscourseMcp::OutputSchema::OBJECT_ARRAY,
+        )
+
+      def self.call(arguments:, request_context:)
+        Tools.ensure_member!(request_context)
+        topic = Tools.find_assigned_topic!(arguments.fetch("topic_id"), request_context)
+        posts = topic.posts.secured(request_context.guardian).where(deleted_at: nil)
+        first = posts.find_by(post_number: 1)
+        last_count = arguments.fetch("last_posts", 5).to_i
+        last =
+          posts.where.not(post_number: 1).order(post_number: :desc).limit(last_count).to_a.reverse
+        row = ->(post, limit) do
+          {
+            post_number: post.post_number,
+            username: post.username,
+            created_at: post.created_at.iso8601,
+            raw: Tools.truncate(post.raw, limit),
+          }
+        end
+        Tools.result(
+          topic: {
+            id: topic.id,
+            title: topic.title,
+            category: topic.category&.name,
+            url: "#{Discourse.base_url}#{topic.relative_url}",
+            posts_count: topic.posts_count,
+            closed: topic.closed,
+            solved: Tools.solved?(topic),
+          },
+          first_post: first ? row.call(first, 8_000) : {},
+          last_posts: last.map { |post| row.call(post, 4_000) },
+        )
+      end
+    end
+
+    module TaskReply
+      REQUIRED_SCOPES = [DiscourseMcp::Scopes::CONTENT_WRITE].freeze
+      OUTPUT_SCHEMA =
+        DiscourseMcp::OutputSchema.object(
+          topic_id: DiscourseMcp::OutputSchema::INTEGER,
+          post_number: DiscourseMcp::OutputSchema::INTEGER,
+          url: DiscourseMcp::OutputSchema::STRING,
+          username: DiscourseMcp::OutputSchema::STRING,
+        )
+
+      def self.call(arguments:, request_context:)
+        user = Tools.ensure_member!(request_context)
+        topic = Tools.find_assigned_topic!(arguments.fetch("topic_id"), request_context)
+        if (topic.closed || Tools.solved?(topic)) && !arguments["confirm_closed"]
+          state = topic.closed ? "zatvorena" : "označena kao riješena"
+          raise DiscourseMcp::ToolError,
+                "Tema ##{topic.id} je #{state}. Pitaj korisnika da li ipak želi javiti; ako da, pozovi ponovo sa confirm_closed=true."
+        end
+        SecretScanner.ensure_clean!(arguments.fetch("raw"))
+        post = Tools.create_post!(user, topic_id: topic.id, raw: arguments.fetch("raw"))
+        post.custom_fields[REPORTED_FIELD] = arguments.fetch("kind")
+        post.save_custom_fields
+        Tools.result(
+          topic_id: post.topic_id,
+          post_number: post.post_number,
+          url: post.full_url,
+          username: post.user.username,
+        )
+      end
+    end
+
+    module ReportPrompt
+      REQUIRED_SCOPES = [DiscourseMcp::Scopes::CONTENT_READ].freeze
+
+      def self.call(arguments:, request_context:)
+        Tools.ensure_member!(request_context)
+        text = REPORT_INSTRUCTIONS
+        text += "\nŠta treba javiti: #{arguments["opis"]}\n" if arguments["opis"].present?
+        {
+          description: "Javi ovo na forum",
+          messages: [{ role: "user", content: { type: "text", text: text } }],
+        }
       end
     end
 

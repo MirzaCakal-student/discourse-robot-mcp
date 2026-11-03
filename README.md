@@ -14,10 +14,19 @@ pod imenom prijavljenog korisnika, bez lozinki.
 | `robot_wiki_create_topic` | Nova tema u IT-Wiki (odbija tekst sa tajnama) |
 | `robot_wiki_reply` | Dopuna postojeće teme u IT-Wiki (odbija tekst sa tajnama) |
 | prompt `robot.dokumentuj` | Obrazac i pravila za dokumentaciju |
+| `robot_my_tasks` | Moje otvorene, neriješene dodjele (kao `/latest?assigned=<korisnik>&solved=no&status=open`), zadnje javljane na vrhu |
+| `robot_task_context` | Prvi post i zadnji odgovori dodijeljene teme |
+| `robot_task_reply` | Odgovor u temu koja je trenutno dodijeljena korisniku (status, urađeno, sljedeći koraci, pitanje) |
+| prompt `robot.javi` | Tok i obrazac za „javi ovo na forum“ |
 
-Pisanje je moguće samo u kategoriju iz `robot_mcp_wiki_category_id`, a čitanje samo iz nje i iz
-`robot_mcp_read_categories` (tačne kategorije, bez potkategorija). Alate mogu koristiti samo članovi
-grupa iz `robot_mcp_allowed_groups`.
+Wiki alati pišu samo u kategoriju iz `robot_mcp_wiki_category_id`, a čitaju samo iz nje i iz
+`robot_mcp_read_categories` (tačne kategorije, bez potkategorija).
+
+Alati za zadatke ne gledaju kategoriju nego dodjelu (discourse-assign): čitaju i pišu samo u teme koje su
+**u tom trenutku** dodijeljene prijavljenom korisniku. Dodjela se provjerava pri svakoj objavi, pa reassign
+odmah važi. Za zatvorenu ili riješenu temu traži se dodatna potvrda (`confirm_closed`).
+
+Alate mogu koristiti samo članovi grupa iz `robot_mcp_allowed_groups`.
 
 ## Postavljanje
 
