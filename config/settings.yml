@@ -1,0 +1,14 @@
+plugins:
+  robot_mcp_enabled:
+    default: false
+  robot_mcp_wiki_category_id:
+    type: category
+    default: ""
+  robot_mcp_read_categories:
+    type: category_list
+    default: ""
+  robot_mcp_allowed_groups:
+    type: group_list
+    list_type: compact
+    default: "1"
+    allow_any: false
